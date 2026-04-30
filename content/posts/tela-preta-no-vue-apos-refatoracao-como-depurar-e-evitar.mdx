@@ -1,0 +1,141 @@
+---
+title: "Tela Preta no Vue Após Refatoração: Como Depurar e Evitar"
+description: "Descubra como diagnosticar e corrigir o comum erro de tela preta no Vue.js que surge após refatorações, com dicas práticas e exemplos de código."
+date: "2026-04-30"
+tags: ["Vue.js", "Debugging", "Refatoração", "Frontend", "JavaScript"]
+---
+
+## Introdução
+
+Você já passou por aquela situação frustrante em que, após uma refatoração em sua aplicação Vue.js, a tela simplesmente fica preta? Esse é um bug relativamente comum, mas que pode consumir um tempo precioso se você não souber por onde começar a investigar. Este post detalha um cenário específico desse problema e oferece um guia prático para sua resolução.
+
+## O problema
+
+O sintoma clássico é uma tela em branco ou preta, acompanhada de mensagens de erro no console semelhantes a:
+
+```text
+[Vue warn]: Property "analysisStateLabel" was accessed during render but is not defined on instance.
+
+Uncaught TypeError: _ctx.analysisStateLabel is not a function
+```
+
+Esse tipo de erro geralmente indica que o template da sua aplicação ainda está tentando chamar uma função ou acessar uma propriedade que foi removida ou renomeada durante o processo de refatoração, especialmente no contexto do ``<script setup>``.
+
+Imagine que você está simplificando uma tela e decide remover filtros de exibição como "Analysis State", "Analysis Readiness" e "Lead Status". Durante essa limpeza, você pode esquecer que alguns componentes de card utilizavam uma função auxiliar, como `analysisStateLabel`, para exibir um badge com base no estado da análise.
+
+O Vue, ao tentar renderizar o template, busca essa função. Se ela não existe mais no escopo do ``<script setup>``, a renderização falha, resultando na tela preta.
+
+## A solução
+
+A correção mais imediata, e muitas vezes tentadora, é simplesmente restaurar a função removida:
+
+```js
+const analysisStateLabel = (state) => {
+  const labels = {
+    ready: 'Ready',
+    limited: 'Limited analysis',
+    missing: 'Missing analysis',
+  }
+
+  return labels[state] ?? 'Unknown'
+}
+```
+
+No entanto, antes de simplesmente "desfazer" a remoção, é crucial fazer uma pausa e questionar: essa informação ainda precisa ser exibida na interface do usuário?
+
+*   **Se sim:** Restaure a função auxiliar, garantindo que ela esteja corretamente definida e acessível.
+*   **Se não:** A abordagem mais limpa é remover a chamada dessa função do template.
+
+O objetivo principal de uma refatoração é, muitas vezes, reduzir a complexidade. Trazer de volta funcionalidades obsoletas pode anular os benefícios do seu trabalho.
+
+## Exemplo prático
+
+Vamos considerar o cenário onde a função `analysisStateLabel` foi removida do ``<script setup>``:
+
+```vue
+<script setup>
+// A função analysisStateLabel foi removida nesta refatoração.
+// O template abaixo ainda a chama:
+</script>
+
+<template>
+  <div>
+    <!-- Este span tentará chamar analysisStateLabel -->
+    <span>{{ analysisStateLabel(job.analysis_state) }}</span>
+  </div>
+</template>
+```
+
+Se a intenção da refatoração era remover a exibição do estado de análise, a correção correta seria remover a linha do template:
+
+```vue
+<template>
+  <div>
+    <!-- Chamada da função removida foi retirada -->
+  </div>
+</template>
+```
+
+Se, por outro lado, a exibição do estado de análise ainda é necessária, mas com uma lógica diferente ou simplificada, você pode restaurar a função com a nova lógica ou uma versão mais genérica.
+
+## Decisões técnicas
+
+A decisão entre restaurar a função ou remover a chamada do template depende diretamente dos objetivos da refatoração. Se a remoção de um filtro implicava que a informação associada não era mais relevante para o usuário, remover a chamada é a escolha mais sustentável. Restaurar a função, embora mais rápido em alguns casos, pode mascarar a necessidade de uma revisão mais profunda do que realmente precisa ser exposto na UI.
+
+Ao realizar refatorações em interfaces, um checklist pode ser útil:
+
+1.  O estado que era usado pelo template foi removido?
+2.  As funções chamadas pelo template foram devidamente tratadas (removidas ou atualizadas)?
+3.  As props usadas em componentes filhos foram revisadas?
+4.  Alguma lógica condicional (`v-if`) dependia dos filtros antigos e precisa ser ajustada?
+
+O processo de build (`npm run build`) é um bom ponto de partida, mas nem todos os erros de runtime são pegos. Por isso, ter testes automatizados é fundamental.
+
+Para aplicações que utilizam Laravel com Inertia, um teste de rota simples pode garantir que o backend responde corretamente:
+
+```php
+use App\Models\User;
+
+public function test_job_leads_page_renders(): void
+{
+    $user = User::factory()->create();
+
+    $this->actingAs($user)
+        ->get(route('job-leads.index'))
+        ->assertOk();
+}
+```
+
+No entanto, testes de backend não garantem a ausência de erros de renderização no frontend. Para isso, testes End-to-End (E2E) com ferramentas como Playwright ou Cypress são ideais.
+
+Mesmo sem testes E2E completos, a prática manual de verificar as rotas principais e o console do navegador após a aplicação ser iniciada é uma etapa valiosa.
+
+```text
+1. Navegue para a rota principal (ex: /job-leads).
+2. Navegue para outras rotas relevantes (ex: /matched-jobs).
+3. Teste com parâmetros de query se aplicável (ex: /job-leads?lead_group=unmatched).
+4. Abra o console do navegador e verifique se há erros de renderização.
+```
+
+Outra boa prática para manter a manutenibilidade é centralizar funções de formatação de labels. Em vez de espalhar lógica de exibição diretamente no template, crie helpers reutilizáveis:
+
+```js
+// Em um arquivo de helpers, por exemplo:
+const keywordLabels = { /* ... */ };
+const analysisLabels = { /* ... */ };
+
+export const keywordLabel = (keyword) => keywordLabels[keyword] ?? keyword;
+export const analysisStateLabel = (state) => analysisLabels[state] ?? 'Unknown';
+```
+
+Isso facilita a atualização de labels em um único local, caso a UI precise mudar.
+
+## O que dá para melhorar
+
+Embora restaurar a função ou remover a chamada do template resolva o problema imediato, a prevenção é sempre o melhor caminho. A combinação de um processo de build robusto, testes de rota e testes manuais no browser, especialmente após mexer em partes complexas da interface, minimiza a chance desses erros ocorrerem.
+
+Para uma prevenção ainda mais eficaz, a adoção de testes E2E que simulem a interação do usuário e verifiquem o estado da UI e a ausência de erros no console pode capturar esses problemas antes que cheguem em produção.
+
+## Conclusão
+
+Depurar uma tela preta no Vue após uma refatoração exige uma análise cuidadosa do que foi modificado e como isso afeta o template. A chave é não apenas corrigir o erro, mas entender a causa raiz e decidir se a funcionalidade removida deve ser restaurada ou se a sua chamada no template deve ser eliminada. Combinar boas práticas de desenvolvimento, testes automatizados e verificação manual é essencial para manter a estabilidade e a qualidade do seu código.

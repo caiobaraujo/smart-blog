@@ -1,0 +1,165 @@
+---
+title: "Construindo um Pipeline de Discovery de Vagas Robusto: Coleta, Deduplicação e Diagnóstico"
+description: "Aprenda a criar um sistema escalável e observável para descobrir vagas de emprego, com foco em deduplicação inteligente e diagnóstico de falhas."
+date: "2026-04-30"
+tags: ["programação", "backend", "arquitetura", "pipeline", "automação"]
+---
+
+## Introdução
+
+Imagine que você está construindo um serviço que ajuda pessoas a encontrar novas oportunidades de carreira. Para isso, é essencial coletar informações sobre vagas de diversas fontes online: sites de carreiras de empresas, agregadores de vagas (job boards), sistemas de rastreamento de candidatos (ATS), feeds RSS, e até mesmo páginas HTML estáticas. O desafio surge quando essa coleta começa a gerar um volume de dados que, se não for bem gerenciado, pode rapidamente transformar seu projeto em um emaranhado de código difícil de manter e depurar.
+
+## O problema
+
+Quando a aplicação precisa buscar vagas em múltiplas fontes, a complexidade aumenta exponencialmente. Dados vindos de diferentes origens, com formatos e estruturas variadas, precisam ser processados. Se todas essas informações forem direcionadas diretamente para o controller principal, a lógica se torna confusa e a manutenção se torna um pesadelo. A falta de um processo estruturado para lidar com a ingestão, normalização e identificação de duplicatas pode levar a uma experiência ruim para o usuário, com vagas repetidas ou a perda de informações importantes.
+
+## A solução
+
+Para enfrentar essa complexidade, a arquitetura de um pipeline de discovery se mostra uma abordagem robusta e escalável. Essa arquitetura organiza o processo de coleta e processamento de vagas em etapas bem definidas, promovendo modularidade e observabilidade.
+
+A estrutura básica de um pipeline pode ser visualizada da seguinte forma:
+
+```text
+Controller
+  -> DiscoveryRunner
+      -> Source A (Ex: ProgramaThor)
+      -> Source B (Ex: Gupy)
+      -> Source C (Ex: Indeed)
+  -> ImportService
+  -> Diagnostics
+```
+
+O `Controller` atua como o ponto de entrada, orquestrando o início do processo de descoberta. Ele delega a responsabilidade de buscar as vagas para o `DiscoveryRunner`.
+
+```php
+public function discover(Request $request)
+{
+    $result = $this->runner->run(
+        user: $request->user(),
+        query: $request->input('query')
+    );
+
+    return back()->with('discovery', $result);
+}
+```
+
+O `DiscoveryRunner` é o maestro do processo. Ele identifica e itera sobre as fontes de vagas que estão habilitadas para uso, buscando os dados de cada uma.
+
+```php
+foreach ($this->enabledSources() as $source) {
+    $entries = $source->fetch($context);
+
+    foreach ($entries as $entry) {
+        $this->importer->import($user, $entry);
+    }
+}
+```
+
+Cada fonte (`Source A`, `Source B`, etc.) possui uma responsabilidade clara: buscar os dados brutos da sua respectiva origem, realizar o parsing inicial e retornar uma lista de "candidatos" a vagas. É crucial que essas fontes sejam focadas e não se preocupem com a lógica de negócio global, ranking de vagas ou criação de regras de produto.
+
+Um "candidato" a vaga pode ser representado por uma estrutura simples, como a classe `DiscoveredJob`:
+
+```php
+final readonly class DiscoveredJob
+{
+    public function __construct(
+        public string $title,
+        public string $company,
+        public string $url,
+        public ?string $description = null,
+        public ?string $location = null,
+        public ?string $workMode = null,
+        public ?string $source = null,
+    ) {}
+}
+```
+
+O `ImportService` entra em cena para normalizar os dados recebidos e, crucialmente, para lidar com a deduplicação.
+
+```php
+$normalizedUrl = $this->urlNormalizer->normalize($entry->url);
+
+return JobLead::query()->firstOrCreate(
+    [
+        'user_id' => $user->id,
+        'normalized_source_url' => $normalizedUrl,
+    ],
+    [
+        'job_title' => $entry->title,
+        'company_name' => $entry->company,
+        'source_url' => $entry->url,
+        'description_text' => $entry->description,
+    ]
+);
+```
+
+## Decisões técnicas
+
+A normalização de URLs é um passo fundamental para evitar a importação de vagas duplicadas. URLs como `/jobs/123?utm_source=google`, `/jobs/123?ref=linkedin` ou `/jobs/123#apply` podem, na prática, referir-se à mesma vaga. Um normalizador de URL pode remover parâmetros de rastreamento ou fragmentos, garantindo que uma única entrada seja criada no sistema.
+
+No entanto, essa abordagem de deduplicação baseada puramente em URL normalizada possui um trade-off. Algumas plataformas podem utilizar parâmetros de query string para diferenciar variantes legítimas de uma mesma vaga (por exemplo, diferentes níveis de senioridade ou modalidades de trabalho). Nesses casos, uma deduplicação excessivamente agressiva pode levar à perda de informações valiosas. É importante que a estratégia de deduplicação seja medida e ajustada conforme a necessidade.
+
+Para garantir a saúde e a eficiência do pipeline, o sistema de `Diagnostics` é essencial. Ele coleta métricas detalhadas em cada etapa do processo, permitindo identificar gargalos e falhas. Algumas métricas importantes incluem:
+
+*   `fetched_count`: Número de itens buscados por fonte.
+*   `parsed_count`: Número de itens parseados com sucesso.
+*   `matched_count`: Número de itens que corresponderam aos critérios de busca.
+*   `imported_count`: Número de itens importados com sucesso.
+*   `duplicate_count`: Número de itens identificados como duplicados.
+*   `skipped_expired_count`: Número de vagas puladas por estarem expiradas.
+*   `skipped_missing_company_count`: Número de vagas puladas por falta de informação da empresa.
+*   `failed_count`: Número total de falhas em uma etapa.
+
+Essas métricas são cruciais para diagnosticar problemas. Quando um usuário relata que uma vaga não apareceu, é possível investigar onde ela se perdeu no funil: a fonte não carregou os dados? O parser não conseguiu extrair as informações? A query de busca filtrou tudo? Era uma duplicata? Ou foi importada, mas está oculta na interface?
+
+Um comando de inspeção no terminal é uma ferramenta poderosa para depuração e diagnóstico. Ele permite executar uma fonte específica sem realizar a importação, exibindo o funil de processamento:
+
+```bash
+php artisan discovery:inspect-source gupy-public-jobs --query=python
+```
+
+Este comando simularia a execução da fonte `gupy-public-jobs` para a query "python", mostrando um resumo do funil:
+
+```text
+Target: Afya
+Fetched: 20
+Parsed: 12
+Matched: 4
+Imported: 0
+Skipped by query: 8
+Failed details: 1
+```
+
+Para testes automatizados, o uso de fixtures (arquivos HTML estáticos que simulam respostas de servidores) é fundamental. Isso permite testar a lógica de parsing de forma isolada e confiável, garantindo que o parser funcione corretamente com diferentes cenários de HTML.
+
+```text
+tests/Fixtures/gupy_listing.html
+tests/Fixtures/gupy_python_detail.html
+tests/Fixtures/gupy_closed_job.html
+```
+
+Um exemplo de teste unitário para um parser:
+
+```php
+it('parses gupy backend jobs from fixture', function () {
+    $html = fixture('gupy_python_detail.html');
+
+    $job = app(GupyParser::class)->parseDetail($html);
+
+    expect($job->title)->toContain('Backend');
+    expect($job->description)->toContain('Python');
+    expect($job->company)->toBe('Afya');
+});
+```
+
+Essa arquitetura modular permite adicionar novas fontes de vagas (como ProgramaThor, Gupy, BNE, Trampos, Indeed) de forma incremental, cada uma implementada como um adaptador específico. O núcleo do sistema permanece inalterado, garantindo escalabilidade e manutenibilidade.
+
+## O que dá para melhorar
+
+A estratégia de deduplicação baseada em URL normalizada pode ser aprimorada. Para cenários onde variantes de vagas são diferenciadas por parâmetros de URL, pode ser necessário implementar regras de exclusão de parâmetros específicas por fonte ou um mapeamento de regras mais sofisticado. Além disso, considerar um score de similaridade entre os dados de vagas (título, descrição, empresa) pode ser uma alternativa ou complemento à deduplicação baseada apenas em URL, especialmente para fontes que não fornecem URLs únicas e confiáveis.
+
+A parte de diagnóstico pode ser expandida com um painel de controle visual para as métricas, facilitando a identificação de tendências e problemas recorrentes. Implementar um sistema robusto de tratamento de erros e retentativas dentro do pipeline também é crucial para garantir a resiliência do sistema contra falhas temporárias de rede ou de serviços externos.
+
+## Conclusão
+
+Construir um sistema de discovery de vagas profissional vai além de simplesmente coletar HTML. Trata-se de projetar e implementar uma esteira de processamento determinística, observável e testável. Uma arquitetura de pipeline bem definida, com foco em modularidade, deduplicação inteligente e diagnóstico detalhado, é a chave para criar um serviço escalável, confiável e fácil de manter, capaz de lidar com a crescente complexidade do ecossistema de busca de empregos.

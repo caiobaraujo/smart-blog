@@ -1,0 +1,204 @@
+---
+title: "Busca Inteligente em Laravel: Dominando a Intenção do Usuário com Parsing Determinístico (Sem IA)"
+description: "Aprenda a construir uma busca poderosa em Laravel interpretando a intenção do usuário com parsing determinístico, sem a necessidade de IA."
+date: "2026-04-30"
+tags: ["Laravel", "Programação", "Busca", "Parsing", "Desenvolvimento Web"]
+---
+
+## Introdução
+
+No universo do desenvolvimento web, a forma como os usuários interagem com as funcionalidades de busca é um fator crítico para a experiência do usuário e o sucesso de uma aplicação. Inicialmente, uma busca simples, baseada em correspondência exata de palavras-chave, pode ser suficiente. No entanto, à medida que os usuários se tornam mais sofisticados em suas interações, eles começam a expressar suas necessidades de forma mais complexa, utilizando frases que denotam intenção em vez de simples termos de busca.
+
+## O problema
+
+Imagine um cenário onde um usuário busca por "python remoto brasil" ou "javascript or laravel". Se tratarmos essas consultas meramente como strings de texto, perdemos informações valiosas. A primeira consulta, por exemplo, não é apenas sobre "python", mas sim sobre vagas de emprego na área de Python, com a preferência por trabalho remoto e com foco no mercado brasileiro. A segunda consulta expressa uma preferência por vagas que envolvam JavaScript *ou* Laravel.
+
+A abordagem tradicional de busca com `LIKE` no banco de dados falha em capturar essas nuances, levando a resultados insatisfatórios e a uma experiência frustrante para o usuário. Precisamos de uma maneira de interpretar a intenção por trás da consulta, sem recorrer a soluções complexas e custosas como inteligência artificial.
+
+## A solução
+
+A solução proposta é a implementação de uma pequena camada de *parsing determinístico*. Em vez de depender de algoritmos de aprendizado de máquina ou APIs externas, criamos um sistema baseado em regras claras, testáveis e fáceis de explicar. Essa abordagem transforma a consulta de texto livre em uma estrutura de dados compreensível pelo backend, permitindo uma lógica de busca mais refinada.
+
+Em um projeto Laravel, podemos implementar isso através de um serviço dedicado, como o `SearchIntentParser`. Este serviço recebe a string de consulta do usuário e a decompõe em componentes estruturados, como palavras-chave, operadores booleanos, modo de trabalho e localização.
+
+```php
+<?php
+
+namespace App\Services;
+
+use Illuminate\Support\Str;
+
+final class SearchIntentParser
+{
+    public function parse(string $query): array
+    {
+        $normalized = Str::of($query)->lower()->squish()->toString();
+
+        return [
+            'keywords' => $this->extractKeywords($normalized),
+            'operator' => $this->detectOperator($normalized),
+            'work_mode' => $this->detectWorkMode($normalized),
+            'location' => $this->detectLocation($normalized),
+            'raw_query' => $query,
+        ];
+    }
+
+    private function extractKeywords(string $normalized): array
+    {
+        // Lógica para extrair palavras-chave relevantes, removendo termos de controle
+        $keywords = preg_split('/\s+(or|and|remote|local|in)\s+/', $normalized);
+        return array_filter(array_map('trim', $keywords));
+    }
+
+    private function detectOperator(string $normalized): string
+    {
+        return Str::contains($normalized, ' or ') ? 'or' : 'any';
+    }
+
+    private function detectWorkMode(string $normalized): ?string
+    {
+        if (Str::contains($normalized, 'remoto')) {
+            return 'remote';
+        }
+        if (Str::contains($normalized, 'local')) {
+            return 'local';
+        }
+        return null;
+    }
+
+    private function detectLocation(string $normalized): ?string
+    {
+        if (Str::contains($normalized, 'brasil')) {
+            return 'brazil';
+        }
+        // Adicionar mais localizações conforme necessário
+        return null;
+    }
+}
+```
+
+Após o parsing, a consulta se transforma em uma estrutura organizada, por exemplo:
+
+```json
+{
+    "keywords": ["python"],
+    "operator": "any",
+    "work_mode": "remote",
+    "location": "brazil",
+    "raw_query": "python remoto brasil"
+}
+```
+
+Essa estrutura permite separar claramente duas responsabilidades distintas: a busca por novos dados em fontes externas (discovery) e a filtragem de dados já existentes no banco de dados.
+
+## Decisões técnicas
+
+Essa separação de responsabilidades é fundamental para manter a clareza e a manutenibilidade do código. Em um controller, por exemplo, o fluxo de descoberta de novos dados pode ser gerenciado de forma limpa:
+
+```php
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Services\SearchIntentParser;
+use App\Services\DiscoveryRunner;
+use Illuminate\Http\Request;
+
+class DiscoveryController extends Controller
+{
+    private SearchIntentParser $parser;
+    private DiscoveryRunner $discoveryRunner;
+
+    public function __construct(SearchIntentParser $parser, DiscoveryRunner $discoveryRunner)
+    {
+        $this->parser = $parser;
+        $this->discoveryRunner = $discoveryRunner;
+    }
+
+    public function discover(Request $request)
+    {
+        $intent = $this->parser->parse($request->input('query', ''));
+
+        $result = $this->discoveryRunner->run(
+            user: $request->user(),
+            intent: $intent,
+        );
+
+        return back()->with('discovery', $result);
+    }
+}
+```
+
+Enquanto isso, a tela de listagem de itens existentes se concentraria apenas na filtragem local:
+
+```php
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\JobLead;
+use App\Services\SearchIntentParser;
+use App\Services\LeadFilter;
+use Illuminate\Http\Request;
+use Inertia\Inertia;
+
+class JobLeadController extends Controller
+{
+    private SearchIntentParser $parser;
+    private LeadFilter $leadFilter;
+
+    public function __construct(SearchIntentParser $parser, LeadFilter $leadFilter)
+    {
+        $this->parser = $parser;
+        $this->leadFilter = $leadFilter;
+    }
+
+    public function index(Request $request)
+    {
+        $query = JobLead::query()
+            ->where('user_id', $request->user()->id);
+
+        if ($request->filled('search')) {
+            $intent = $this->parser->parse($request->search);
+            $query = $this->leadFilter->apply($query, $intent);
+        }
+
+        return Inertia::render('JobLeads/Index', [
+            'leads' => $query->paginate(),
+        ]);
+    }
+}
+```
+
+Essa arquitetura evita a confusão de responsabilidades e torna o comportamento do sistema muito mais previsível. Além disso, a testabilidade é significativamente aprimorada. Podemos testar o `SearchIntentParser` de forma isolada, garantindo que ele interprete corretamente diversas intenções do usuário:
+
+```php
+<?php
+
+it('parses a remote brazil python search', function () {
+    $intent = app(App\Services\SearchIntentParser::class)->parse('python remoto brasil');
+
+    expect($intent['keywords'])->toBe(['python']);
+    expect($intent['work_mode'])->toBe('remote');
+    expect($intent['location'])->toBe('brazil');
+});
+
+it('parses a javascript or laravel search', function () {
+    $intent = app(App\Services\SearchIntentParser::class)->parse('javascript or laravel');
+
+    expect($intent['keywords'])->toBe(['javascript', 'laravel']);
+    expect($intent['operator'])->toBe('or');
+});
+```
+
+E também podemos testar a lógica de filtragem sem depender de fontes de dados externas.
+
+## O que dá para melhorar
+
+Embora o parsing determinístico seja uma solução robusta para muitos casos, ele possui suas limitações. A complexidade das regras de parsing pode crescer rapidamente à medida que mais intenções, operadores e entidades precisam ser reconhecidas. Manter um conjunto extenso de regras pode se tornar um desafio de manutenção a longo prazo.
+
+Para cenários onde a linguagem natural é extremamente variada e as intenções são ambíguas, a introdução de técnicas de Processamento de Linguagem Natural (PLN) ou até mesmo de IA pode ser considerada. No entanto, é crucial avaliar se os benefícios adicionais justificam a complexidade e o custo associados a essas abordagens. A chave é começar com o determinístico e introduzir complexidade apenas quando estritamente necessário.
+
+## Conclusão
+
+Implementar uma busca inteligente em Laravel não requer necessariamente o uso de IA. Ao adotar uma abordagem de parsing determinístico, podemos criar uma camada de interpretação de intenções que transforma consultas de texto livre em estruturas de dados utilizáveis. Essa estratégia melhora a clareza da arquitetura, a previsibilidade do comportamento do sistema, a testabilidade e, o mais importante, a experiência do usuário, oferecendo uma busca mais natural e eficaz. Antes de mergulhar em soluções de IA, vale a pena explorar o poder das regras simples e bem definidas.

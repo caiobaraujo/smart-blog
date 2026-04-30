@@ -1,0 +1,163 @@
+---
+title: "Além do `->text()`: Scraping Robusto em PHP Limpando e Direcionando Conteúdo"
+description: "Aprenda a evitar que HTML, JavaScript e analytics contaminem seu scraping em PHP, focando em extração de dados limpa e direcionada."
+date: "2026-04-30"
+tags: ["PHP", "Web Scraping", "DomCrawler", "Engenharia de Dados"]
+---
+
+## Introdução
+
+Você já se deparou com um resultado de web scraping que parecia um amontoado de código aleatório em vez do conteúdo que você esperava? Se a sua resposta for sim, você não está sozinho. Extrair dados de páginas web pode ser um desafio, especialmente com a complexidade crescente das interfaces modernas.
+
+## O problema
+
+O erro mais comum ao iniciar um projeto de web scraping é acreditar que simplesmente extrair todo o texto de um documento HTML é suficiente. Na prática, essa abordagem raramente funciona. Em vez de obter a descrição de uma vaga de emprego, por exemplo, você pode acabar com menus de navegação, rodapés, trechos de JavaScript, estilos CSS, dados em formato JSON-LD, banners de cookies e até mesmo tokens de analytics.
+
+O resultado é uma lista de palavras-chave que não têm relação com o conteúdo desejado, como:
+
+```text
+return
+const
+var
+breadcrumb
+primaryimage
+png
+nreum
+```
+
+Esses elementos são considerados "lixo de página" e poluem seus resultados. O problema geralmente começa com uma linha de código aparentemente inofensiva:
+
+```php
+$text = $crawler->text();
+```
+
+Embora conveniente, este comando captura tudo. Em páginas web modernas, "tudo" é uma quantidade considerável de dados irrelevantes para a maioria das tarefas de extração.
+
+## A solução
+
+Uma abordagem mais eficaz é limpar o conteúdo da página antes e depois de buscar as áreas de interesse específicas. Ao utilizar o Symfony DomCrawler, podemos começar removendo nós óbvios que geralmente não contêm o conteúdo principal.
+
+### Limpeza inicial de nós irrelevantes
+
+Podemos criar uma função para remover elementos como `script`, `style`, `nav`, `header`, `footer`, `noscript` e `svg`.
+
+```php
+private function removeIrrelevantNodes(Crawler $crawler): void
+{
+    $crawler->filter('script, style, nav, header, footer, noscript, svg')->each(
+        function (Crawler $node) {
+            $domNode = $node->getNode(0);
+
+            if ($domNode && $domNode->parentNode) {
+                $domNode->parentNode->removeChild($domNode);
+            }
+        }
+    );
+}
+```
+
+Após essa limpeza inicial, o próximo passo é evitar a extração do corpo inteiro da página. Em vez disso, devemos focar em identificar seções específicas que provavelmente contêm o conteúdo desejado.
+
+### Identificação e extração de conteúdo específico
+
+Para isso, podemos definir uma lista de seletores CSS que representam as áreas onde o conteúdo principal pode ser encontrado.
+
+```php
+$selectors = [
+    '[data-testid="job-description"]',
+    '.job-description',
+    '.description',
+    '.requirements',
+    '.responsibilities',
+    'main',
+];
+```
+
+A ideia é priorizar seletores que apontam para conteúdo mais específico.
+
+```php
+private function extractMainContent(Crawler $crawler): string
+{
+    foreach ($this->selectors as $selector) {
+        $nodes = $crawler->filter($selector);
+
+        if ($nodes->count() === 0) {
+            continue;
+        }
+
+        $texts = $nodes->each(fn (Crawler $node) => $node->text(''));
+        $joinedText = trim(implode("\n", $texts));
+
+        // Usamos uma heurística de contagem de palavras para validar a relevância
+        if (str_word_count($joinedText) > 80) {
+            return $this->normalizeText($joinedText);
+        }
+    }
+
+    return '';
+}
+```
+
+### Heurística de contagem de palavras
+
+Uma regra de tamanho é crucial aqui. Se o texto extraído tiver apenas algumas palavras, é provável que seja um card de listagem ou um resumo curto, e não uma descrição completa. Nesses casos, é mais honesto marcar a análise como limitada do que apresentar dados incompletos como se fossem completos.
+
+```php
+if (str_word_count($description) < 80) {
+    $lead->analysis_state = 'limited';
+}
+```
+
+Além disso, é importante evitar a extração de dados técnicos em formato JSON, como os encontrados em blocos `application/ld+json`. Chaves como `primaryImage`, `breadcrumb` ou `contentUrl` não representam o conteúdo humano que estamos buscando.
+
+### Limpeza pós-extração
+
+Após a extração, uma limpeza leve pode ser aplicada para remover elementos indesejados que possam ter escapado.
+
+```php
+private function normalizeText(string $text): string
+{
+    // Remove URLs
+    $text = preg_replace('/https?:\/\/\S+/', ' ', $text);
+    // Remove nomes de arquivos de imagem comuns
+    $text = preg_replace('/\b\w+\.(png|jpg|jpeg|webp|svg)\b/i', ' ', $text);
+    // Normaliza múltiplos espaços em um único espaço
+    $text = preg_replace('/\s+/', ' ', $text);
+
+    return trim($text);
+}
+```
+
+## Decisões técnicas
+
+A principal decisão técnica é abandonar a abordagem de "lista negra" (blacklist) como solução central. Se termos como `const`, `return` e `var` aparecem em seus resultados, o problema está na origem: você está tentando extrair código JavaScript como se fosse conteúdo textual.
+
+A abordagem sustentável para web scraping é ser específico quanto à fonte dos dados. Em vez de um parser genérico, crie parsers dedicados para cada plataforma ou tipo de página. Por exemplo:
+
+*   Se a fonte é o Gupy, crie um parser específico para o Gupy.
+*   Se a fonte é o BNE, desenvolva um parser para o BNE.
+*   Se a página é de carreira de uma empresa específica, crie uma estratégia adaptada ao padrão dessa página.
+
+Scraping sustentável não se trata de extrair tudo, mas sim de buscar conteúdo confiável, rejeitar o que não pode ser compreendido e medir onde ocorrem as falhas.
+
+## O que dá para melhorar
+
+Embora a abordagem de limpeza e direcionamento seja eficaz, existem áreas para aprimoramento contínuo. O tratamento de conteúdo dinâmico carregado via JavaScript é um desafio comum em web scraping moderno que não foi abordado diretamente aqui. Ferramentas como Puppeteer ou Playwright podem ser necessárias para lidar com páginas que dependem fortemente de JavaScript para renderizar seu conteúdo.
+
+A heurística de contagem de palavras (80 palavras) é um ponto de partida. O número ideal pode variar dependendo do tipo de conteúdo que você está extraindo. Uma análise mais aprofundada dos padrões de dados pode ajudar a refinar essa métrica.
+
+A criação de parsers específicos por fonte é uma prática recomendada, mas requer um esforço contínuo de manutenção à medida que as estruturas das páginas web mudam.
+
+## Conclusão
+
+Transformar web scraping em uma disciplina de engenharia requer mais do que apenas extrair dados. É fundamental implementar diagnósticos para entender o processo. Registrar métricas como:
+
+```text
+fetched: 20
+parsed_candidates: 15
+detail_enriched: 12
+missing_description: 3
+skipped_expired: 2
+```
+
+permite identificar gargalos e áreas de melhoria. Sem diagnóstico, o scraping se resume a tentativa e erro. Com ele, você sabe exatamente onde concentrar seus esforços para construir um sistema de extração de dados robusto e confiável.
